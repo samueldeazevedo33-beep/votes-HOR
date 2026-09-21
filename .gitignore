@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Captures produites par scripts/test_site.py
+*.png
