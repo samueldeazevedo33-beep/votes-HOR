@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Votes budgétaires — Horizons &amp; Indépendants</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231f5fa9'/%3E%3Cpath d='M9 22V10h3v4.5h8V10h3v12h-3v-4.8h-8V22z' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="porte" class="porte" hidden>
+  <form class="porte-carte" id="porte-form">
+    <h1>Votes budgétaires</h1>
+    <p class="porte-sous">Groupe Horizons &amp; Indépendants — Assemblée nationale</p>
+    <label for="porte-mdp">Mot de passe du groupe</label>
+    <input type="password" id="porte-mdp" autocomplete="current-password" required>
+    <button type="submit">Entrer</button>
+    <p class="porte-erreur" id="porte-erreur" hidden>Mot de passe incorrect.</p>
+    <p class="porte-note">
+      Les scrutins publics sont des données publiques. Ce mot de passe réserve
+      l’outil au groupe, il ne protège pas un secret.
+    </p>
+  </form>
+</div>
+
+<div id="app" hidden>
+
+  <header class="entete">
+    <div class="entete-titre">
+      <h1>Votes budgétaires du groupe</h1>
+      <p id="entete-resume"></p>
+    </div>
+    <nav class="onglets" role="tablist">
+      <button class="onglet actif" data-vue="scrutins" role="tab">Scrutins</button>
+      <button class="onglet" data-vue="deputes" role="tab">Députés</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Vue scrutins -->
+    <section id="vue-scrutins">
+      <div class="filtres">
+        <div class="champ champ-large">
+          <label for="f-recherche">Rechercher</label>
+          <input type="search" id="f-recherche" placeholder="objet, article, auteur d’amendement…">
+        </div>
+        <div class="champ">
+          <label for="f-texte">Texte</label>
+          <select id="f-texte"><option value="">Tous</option></select>
+        </div>
+        <div class="champ">
+          <label for="f-categorie">Nature</label>
+          <select id="f-categorie">
+            <option value="">Toutes</option>
+            <option value="ensemble">Vote sur l’ensemble</option>
+            <option value="motion">Motion</option>
+            <option value="article">Article</option>
+            <option value="amendement">Amendement</option>
+            <option value="sous-amendement">Sous-amendement</option>
+            <option value="autre">Autre</option>
+          </select>
+        </div>
+        <div class="champ">
+          <label for="f-position">Position du groupe</label>
+          <select id="f-position">
+            <option value="">Toutes</option>
+            <option value="pour">Pour</option>
+            <option value="contre">Contre</option>
+            <option value="abstention">Abstention</option>
+          </select>
+        </div>
+        <div class="champ">
+          <label for="f-sort">Issue du vote</label>
+          <select id="f-sort">
+            <option value="">Toutes</option>
+            <option value="adopté">Adopté</option>
+            <option value="rejeté">Rejeté</option>
+          </select>
+        </div>
+        <div class="champ">
+          <label for="f-depute">Député</label>
+          <select id="f-depute"><option value="">Tous</option></select>
+        </div>
+        <div class="champ champ-cases">
+          <label><input type="checkbox" id="f-marquants"> Votes marquants seulement</label>
+          <label><input type="checkbox" id="f-ecarts"> Écarts avec la ligne du groupe</label>
+        </div>
+      </div>
+
+      <div class="barre-resultats">
+        <p id="compte"></p>
+        <div class="actions">
+          <button id="btn-edl" class="bouton-primaire">Générer un élément de langage</button>
+          <button id="btn-reset" class="bouton-discret">Réinitialiser</button>
+        </div>
+      </div>
+
+      <ol id="liste" class="liste"></ol>
+      <div class="plus"><button id="btn-plus" hidden>Afficher la suite</button></div>
+    </section>
+
+    <!-- Vue députés -->
+    <section id="vue-deputes" hidden>
+      <div class="filtres">
+        <div class="champ champ-large">
+          <label for="f-depute-recherche">Rechercher un député</label>
+          <input type="search" id="f-depute-recherche" placeholder="nom, prénom, département…">
+        </div>
+        <div class="champ">
+          <label for="f-depute-texte">Texte</label>
+          <select id="f-depute-texte"><option value="">Tous</option></select>
+        </div>
+        <div class="champ champ-cases">
+          <label><input type="checkbox" id="f-depute-actifs" checked> Membres actuels du groupe</label>
+        </div>
+      </div>
+      <div id="grille-deputes" class="grille"></div>
+    </section>
+  </main>
+
+  <footer class="pied">
+    <p>
+      Source&nbsp;: <a href="https://data.assemblee-nationale.fr" rel="noopener">data.assemblee-nationale.fr</a>,
+      Licence Ouverte. <span id="pied-maj"></span>
+    </p>
+    <p id="pied-resumes"></p>
+  </footer>
+</div>
+
+<!-- Fiche député, également le support de l’impression PDF -->
+<div id="fiche" class="fiche" hidden>
+  <div class="fiche-fond" data-fermer></div>
+  <article class="fiche-carte" id="fiche-carte"></article>
+</div>
+
+<!-- Élément de langage -->
+<div id="edl" class="fiche" hidden>
+  <div class="fiche-fond" data-fermer></div>
+  <article class="fiche-carte fiche-edl">
+    <header class="fiche-entete">
+      <h2>Élément de langage</h2>
+      <button class="bouton-fermer" data-fermer aria-label="Fermer">&times;</button>
+    </header>
+    <p class="edl-note" id="edl-note"></p>
+    <textarea id="edl-texte" rows="18" spellcheck="false"></textarea>
+    <div class="fiche-actions">
+      <button id="btn-copier" class="bouton-primaire">Copier</button>
+      <button id="btn-telecharger" class="bouton-discret">Télécharger en .txt</button>
+      <span id="copie-ok" class="copie-ok" hidden>Copié</span>
+    </div>
+  </article>
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

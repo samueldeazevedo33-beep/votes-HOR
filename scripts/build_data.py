@@ -57,12 +57,14 @@ TEXTES_BUDGETAIRES = [
                 "|approbation des comptes de la sécurité sociale"),
 ]
 
+# Le libelle porte le « pour » afin que la concatenation avec le millesime
+# donne une formule correcte : « projet de loi de finances pour 2026 ».
 LIBELLES_TEXTES = {
-    "PLF": "Projet de loi de finances",
-    "PLFG": "Projet de loi de finances de fin de gestion",
-    "PLFR": "Projet de loi de finances rectificative",
+    "PLF": "Projet de loi de finances pour",
+    "PLFG": "Projet de loi de finances de fin de gestion pour",
+    "PLFR": "Projet de loi de finances rectificative pour",
     "PLF_SPECIALE": "Projet de loi spéciale",
-    "PLFSS": "Projet de loi de financement de la sécurité sociale",
+    "PLFSS": "Projet de loi de financement de la sécurité sociale pour",
     "PLFSSR": "Projet de loi de financement rectificative de la sécurité sociale",
     "LPFP": "Loi de programmation des finances publiques",
     "COMPTES": "Approbation des comptes",
@@ -167,12 +169,27 @@ def extraire_amendement(objet: str):
     }
 
 
+# Les numeros d'article se poursuivent par un rang latin (« 15 bis »,
+# « 20 octies ») qu'il faut capturer, sans avaler la preposition qui suit.
+RANGS = ("bis|ter|quater|quinquies|sexies|septies|octies|nonies|decies"
+         "|undecies|duodecies|terdecies|quaterdecies|quindecies|sexdecies|vicies")
+
+MOTIF_ARTICLE = re.compile(
+    r"(?:\u00e0|apr\u00e8s|avant)\s+l'article\s+"
+    r"(liminaire|premier|\d+(?:\s+(?:" + RANGS + r"))*)",
+    re.IGNORECASE,
+)
+MOTIF_ARTICLE_SEUL = re.compile(
+    r"^l'article\s+(liminaire|premier|\d+(?:\s+(?:" + RANGS + r"))*)",
+    re.IGNORECASE,
+)
+
+
 def extraire_article(objet: str):
-    trouve = re.search(r"à l'article ([^\s]+(?: [a-z]+)?)", objet, re.IGNORECASE)
-    if trouve:
-        return trouve.group(1).strip()
-    trouve = re.search(r"^l'article ([^\s]+(?: [a-z]+)?)", objet, re.IGNORECASE)
-    return trouve.group(1).strip() if trouve else None
+    trouve = MOTIF_ARTICLE.search(objet) or MOTIF_ARTICLE_SEUL.search(objet)
+    if not trouve:
+        return None
+    return re.sub(r"\s+", " ", trouve.group(1)).strip().lower()
 
 
 def charger_deputes(archive: Path) -> dict:
