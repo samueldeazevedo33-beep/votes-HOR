@@ -3,149 +3,144 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow">
-<title>Votes budgétaires — Horizons &amp; Indépendants</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231f5fa9'/%3E%3Cpath d='M9 22V10h3v4.5h8V10h3v12h-3v-4.8h-8V22z' fill='white'/%3E%3C/svg%3E">
+<meta name="description" content="Extraire, simplifier et mettre en forme les votes des députés et des groupes de l'Assemblée nationale.">
+<title>Votes à l'Assemblée</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232a78d6'/%3E%3Crect x='7' y='16' width='4' height='9' fill='white'/%3E%3Crect x='14' y='11' width='4' height='14' fill='white'/%3E%3Crect x='21' y='7' width='4' height='18' fill='white'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
-<div id="porte" class="porte" hidden>
-  <form class="porte-carte" id="porte-form">
-    <h1>Votes budgétaires</h1>
-    <p class="porte-sous">Groupe Horizons &amp; Indépendants — Assemblée nationale</p>
-    <label for="porte-mdp">Mot de passe du groupe</label>
-    <input type="password" id="porte-mdp" autocomplete="current-password" required>
-    <button type="submit">Entrer</button>
-    <p class="porte-erreur" id="porte-erreur" hidden>Mot de passe incorrect.</p>
-    <p class="porte-note">
-      Les scrutins publics sont des données publiques. Ce mot de passe réserve
-      l’outil au groupe, il ne protège pas un secret.
-    </p>
-  </form>
-</div>
+<header class="entete">
+  <div class="dedans">
+    <h1>Votes à l'Assemblée nationale</h1>
+    <p id="entete-resume">Chargement des scrutins…</p>
+  </div>
+</header>
 
-<div id="app" hidden>
+<main class="dedans" id="app" hidden>
 
-  <header class="entete">
-    <div class="entete-titre">
-      <h1>Votes budgétaires du groupe</h1>
-      <p id="entete-resume"></p>
+  <section class="selection" aria-label="Sélection">
+    <div class="rangee">
+      <fieldset class="bascule">
+        <legend>Sujet</legend>
+        <label><input type="radio" name="sujet" value="groupe" checked> Un groupe</label>
+        <label><input type="radio" name="sujet" value="depute"> Un député</label>
+      </fieldset>
+      <div class="champ champ-large">
+        <label for="f-groupe" id="lab-sujet">Groupe</label>
+        <select id="f-groupe"></select>
+        <select id="f-depute" hidden></select>
+      </div>
     </div>
-    <nav class="onglets" role="tablist">
-      <button class="onglet actif" data-vue="scrutins" role="tab">Scrutins</button>
-      <button class="onglet" data-vue="deputes" role="tab">Députés</button>
-    </nav>
-  </header>
 
-  <main>
-    <!-- Vue scrutins -->
-    <section id="vue-scrutins">
-      <div class="filtres">
-        <div class="champ champ-large">
-          <label for="f-recherche">Rechercher</label>
-          <input type="search" id="f-recherche" placeholder="objet, article, auteur d’amendement…">
+    <div class="rangee">
+      <fieldset class="bascule">
+        <legend>Périmètre</legend>
+        <label><input type="radio" name="perimetre" value="texte" checked> Un texte</label>
+        <label><input type="radio" name="perimetre" value="periode"> Une période</label>
+      </fieldset>
+      <div class="champ champ-large" id="bloc-texte">
+        <label for="f-texte">Texte</label>
+        <select id="f-texte"></select>
+      </div>
+      <div class="champ champ-dates" id="bloc-periode" hidden>
+        <div>
+          <label for="f-debut">Du</label>
+          <input type="date" id="f-debut">
         </div>
-        <div class="champ">
-          <label for="f-texte">Texte</label>
-          <select id="f-texte"><option value="">Tous</option></select>
-        </div>
-        <div class="champ">
-          <label for="f-categorie">Nature</label>
-          <select id="f-categorie">
-            <option value="">Toutes</option>
-            <option value="ensemble">Vote sur l’ensemble</option>
-            <option value="motion">Motion</option>
-            <option value="article">Article</option>
-            <option value="amendement">Amendement</option>
-            <option value="sous-amendement">Sous-amendement</option>
-            <option value="autre">Autre</option>
-          </select>
-        </div>
-        <div class="champ">
-          <label for="f-position">Position du groupe</label>
-          <select id="f-position">
-            <option value="">Toutes</option>
-            <option value="pour">Pour</option>
-            <option value="contre">Contre</option>
-            <option value="abstention">Abstention</option>
-          </select>
-        </div>
-        <div class="champ">
-          <label for="f-sort">Issue du vote</label>
-          <select id="f-sort">
-            <option value="">Toutes</option>
-            <option value="adopté">Adopté</option>
-            <option value="rejeté">Rejeté</option>
-          </select>
-        </div>
-        <div class="champ">
-          <label for="f-depute">Député</label>
-          <select id="f-depute"><option value="">Tous</option></select>
-        </div>
-        <div class="champ champ-cases">
-          <label><input type="checkbox" id="f-marquants"> Votes marquants seulement</label>
-          <label><input type="checkbox" id="f-ecarts"> Écarts avec la ligne du groupe</label>
+        <div>
+          <label for="f-fin">Au</label>
+          <input type="date" id="f-fin">
         </div>
       </div>
+    </div>
 
-      <div class="barre-resultats">
-        <p id="compte"></p>
-        <div class="actions">
-          <button id="btn-edl" class="bouton-primaire">Générer un élément de langage</button>
-          <button id="btn-reset" class="bouton-discret">Réinitialiser</button>
-        </div>
+    <div class="rangee rangee-fine">
+      <div class="champ">
+        <label for="f-nature">Nature du scrutin</label>
+        <select id="f-nature"><option value="">Toutes</option></select>
       </div>
-
-      <ol id="liste" class="liste"></ol>
-      <div class="plus"><button id="btn-plus" hidden>Afficher la suite</button></div>
-    </section>
-
-    <!-- Vue députés -->
-    <section id="vue-deputes" hidden>
-      <div class="filtres">
-        <div class="champ champ-large">
-          <label for="f-depute-recherche">Rechercher un député</label>
-          <input type="search" id="f-depute-recherche" placeholder="nom, prénom, département…">
-        </div>
-        <div class="champ">
-          <label for="f-depute-texte">Texte</label>
-          <select id="f-depute-texte"><option value="">Tous</option></select>
-        </div>
-        <div class="champ champ-cases">
-          <label><input type="checkbox" id="f-depute-actifs" checked> Membres actuels du groupe</label>
-        </div>
+      <div class="champ">
+        <label for="f-issue">Issue</label>
+        <select id="f-issue">
+          <option value="">Toutes</option>
+          <option value="adopté">Adopté</option>
+          <option value="rejeté">Rejeté</option>
+        </select>
       </div>
-      <div id="grille-deputes" class="grille"></div>
-    </section>
-  </main>
+      <div class="champ champ-large">
+        <label for="f-recherche">Dans l'objet du scrutin</label>
+        <input type="search" id="f-recherche" placeholder="article, auteur d'amendement…">
+      </div>
+      <div class="champ champ-bouton">
+        <button id="btn-reset" class="bouton-discret">Réinitialiser</button>
+      </div>
+    </div>
+  </section>
+
+  <p class="compte" id="compte"></p>
+
+  <section class="figure" id="figure-sujet">
+    <div class="figure-entete">
+      <div>
+        <h2 id="titre-sujet"></h2>
+        <p class="figure-sous" id="sous-sujet"></p>
+      </div>
+      <button class="bouton-discret" data-png="figure-sujet">Télécharger en PNG</button>
+    </div>
+    <div class="toile" id="toile-sujet"></div>
+    <details class="tableau">
+      <summary>Voir les chiffres</summary>
+      <div id="table-sujet"></div>
+    </details>
+  </section>
+
+  <section class="figure" id="figure-groupes">
+    <div class="figure-entete">
+      <div>
+        <h2>Position des groupes</h2>
+        <p class="figure-sous" id="sous-groupes"></p>
+      </div>
+      <button class="bouton-discret" data-png="figure-groupes">Télécharger en PNG</button>
+    </div>
+    <div class="toile" id="toile-groupes"></div>
+    <details class="tableau">
+      <summary>Voir les chiffres</summary>
+      <div id="table-groupes"></div>
+    </details>
+  </section>
+
+  <section class="sorties">
+    <h2>Mettre en forme</h2>
+    <p class="figure-sous">Deux registres à partir de la même sélection : une note descriptive et neutre, un élément de langage écrit pour être repris à l'oral ou dans un communiqué.</p>
+    <div class="actions">
+      <button id="btn-note" class="bouton-primaire">Rédiger une note</button>
+      <button id="btn-edl" class="bouton-primaire">Rédiger un élément de langage</button>
+    </div>
+  </section>
+
+  <section class="liste-section">
+    <h2>Scrutins retenus</h2>
+    <ol id="liste" class="liste"></ol>
+    <div class="plus"><button id="btn-plus" class="bouton-discret" hidden></button></div>
+  </section>
 
   <footer class="pied">
-    <p>
-      Source&nbsp;: <a href="https://data.assemblee-nationale.fr" rel="noopener">data.assemblee-nationale.fr</a>,
-      Licence Ouverte. <span id="pied-maj"></span>
-    </p>
-    <p id="pied-resumes"></p>
+    <p>Source&nbsp;: <a href="https://data.assemblee-nationale.fr" rel="noopener">data.assemblee-nationale.fr</a>, Licence Ouverte. <span id="pied-maj"></span></p>
+    <p>Les mises au point au sujet du vote ne sont pas reprises&nbsp;: elles figurent au compte rendu mais ne modifient pas le résultat proclamé.</p>
   </footer>
-</div>
+</main>
 
-<!-- Fiche député, également le support de l’impression PDF -->
-<div id="fiche" class="fiche" hidden>
-  <div class="fiche-fond" data-fermer></div>
-  <article class="fiche-carte" id="fiche-carte"></article>
-</div>
-
-<!-- Élément de langage -->
-<div id="edl" class="fiche" hidden>
-  <div class="fiche-fond" data-fermer></div>
-  <article class="fiche-carte fiche-edl">
-    <header class="fiche-entete">
-      <h2>Élément de langage</h2>
+<div id="modale" class="modale" hidden>
+  <div class="modale-fond" data-fermer></div>
+  <article class="modale-carte">
+    <header class="modale-entete">
+      <h2 id="modale-titre"></h2>
       <button class="bouton-fermer" data-fermer aria-label="Fermer">&times;</button>
     </header>
-    <p class="edl-note" id="edl-note"></p>
-    <textarea id="edl-texte" rows="18" spellcheck="false"></textarea>
-    <div class="fiche-actions">
+    <p class="figure-sous" id="modale-note"></p>
+    <textarea id="modale-texte" rows="16" spellcheck="false"></textarea>
+    <div class="actions">
       <button id="btn-copier" class="bouton-primaire">Copier</button>
       <button id="btn-telecharger" class="bouton-discret">Télécharger en .txt</button>
       <span id="copie-ok" class="copie-ok" hidden>Copié</span>
@@ -153,7 +148,8 @@
   </article>
 </div>
 
-<script src="config.js"></script>
+<div id="infobulle" class="infobulle" hidden></div>
+
 <script src="app.js"></script>
 </body>
 </html>

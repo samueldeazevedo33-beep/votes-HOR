@@ -20,18 +20,19 @@ jobs:
           python-version: "3.12"
 
       - name: Construire le jeu de donnees
-        env:
-          AMENDEMENTS_FEED_URL: ${{ secrets.AMENDEMENTS_FEED_URL }}
         run: python3 scripts/build_data.py
+
+      - name: Verifier la coherence
+        run: python3 scripts/verifier_donnees.py
 
       - name: Publier si les votes ont change
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- docs/data/votes.json; then
+          if git diff --quiet -- docs/data/; then
             echo "Aucun scrutin nouveau."
             exit 0
           fi
-          git add docs/data/votes.json
-          git commit -m "Donnees: rafraichissement des scrutins budgetaires"
+          git add docs/data/
+          git commit -m "Donnees: rafraichissement des scrutins"
           git push

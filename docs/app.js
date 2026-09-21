@@ -1,529 +1,382 @@
 'use strict';
 
-/* Outil de consultation des votes budgétaires du groupe Horizons & Indépendants.
-   Sans dépendance externe : il doit continuer de fonctionner tel quel dans
-   plusieurs années, sans réinstallation ni chaîne de construction. */
+/* Extraction et mise en forme des votes de l'Assemblee nationale.
+   Sans dependance ni chaine de construction : l'outil doit continuer de
+   fonctionner tel quel, servi par n'importe quel hebergeur statique. */
 
-const PAS_AFFICHAGE = 60;
-const CLE_SESSION = 'votes-hor-ouvert';
+const PAS_LISTE = 40;
 
-const LIBELLE_VOTE = { p: 'pour', c: 'contre', a: 'abstention', n: 'non-votant', '-': 'absent' };
-const LIBELLE_CATEGORIE = {
-  ensemble: 'Vote sur l’ensemble',
-  motion: 'Motion',
-  article: 'Article',
-  amendement: 'Amendement',
-  'sous-amendement': 'Sous-amendement',
-  autre: 'Autre',
+// Position majoritaire d'un groupe, telle que codee par le pipeline.
+const POSITIONS = ['p', 'c', 'a', 's'];
+
+const LIBELLES = {
+  p: 'Pour', c: 'Contre', a: 'Abstention',
+  n: 'Non-votant', x: 'Absent', s: 'Sans position',
 };
+
+// L'ordre des segments suit la polarite : pour, neutre, contre, puis ce qui
+// n'est pas une prise de position.
+const SERIES = [
+  { cle: 'p', variable: '--pour' },
+  { cle: 'a', variable: '--abstention' },
+  { cle: 'c', variable: '--contre' },
+  { cle: 'n', variable: '--nonvotant' },
+  { cle: 'x', variable: '--absent' },
+  { cle: 's', variable: '--absent' },
+];
 
 const etat = {
-  donnees: null,
-  vue: 'scrutins',
-  affiches: PAS_AFFICHAGE,
-  deplies: new Set(),
+  index: null,
+  nominatif: null,
+  rangs: [],        // indices des scrutins retenus, alignes sur le fichier nominatif
+  affiches: PAS_LISTE,
 };
 
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
 
-/* ---------------------------------------------------------------- Outils */
+const fmtLong = new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+const fmtCourt = new Intl.DateTimeFormat('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit' });
 
-const formateurDate = new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
-const formateurCourt = new Intl.DateTimeFormat('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-
-function dateLongue(iso) { return formateurDate.format(new Date(iso + 'T12:00:00')); }
-function dateCourte(iso) { return formateurCourt.format(new Date(iso + 'T12:00:00')); }
-
-function nombre(n) { return n.toLocaleString('fr-FR'); }
-
-function ordinal(n) { return Number(n) === 1 ? '1\u02b3\u1d49' : `${n}\u1d49`; }
-
-/** Le libelle de circonscription, ou une chaine vide si la source ne la donne pas. */
-function libelleCirco(depute) {
-  const c = depute.circonscription;
-  if (!c) return '';
-  return c.circo ? `${c.departement} \u2014 ${ordinal(c.circo)} circonscription` : c.departement;
-}
+const dateLongue = (iso) => fmtLong.format(new Date(iso + 'T12:00:00'));
+const dateCourte = (iso) => fmtCourt.format(new Date(iso + 'T12:00:00'));
+const nombre = (n) => n.toLocaleString('fr-FR');
 
 function echapper(texte) {
-  const d = document.createElement('div');
-  d.textContent = texte == null ? '' : String(texte);
-  return d.innerHTML;
+  return String(texte == null ? '' : texte)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-/** Normalise pour la recherche : sans accents, sans casse, sans apostrophe typographique. */
 function normaliser(texte) {
-  return String(texte || '')
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
-    .replace(/[’']/g, ' ')
-    .toLowerCase();
+  return String(texte || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[’']/g, ' ').toLowerCase();
 }
 
-function voteDe(scrutin, rangDepute) {
-  return scrutin.votes[rangDepute] || '-';
+/** Les couleurs sont resolues en hexadecimal : une variable CSS ne survit pas
+    a la serialisation du SVG vers une image. */
+function couleurs() {
+  const calcule = getComputedStyle(document.documentElement);
+  const table = {};
+  for (const serie of SERIES) table[serie.cle] = calcule.getPropertyValue(serie.variable).trim();
+  table.texte = calcule.getPropertyValue('--texte').trim();
+  table.doux = calcule.getPropertyValue('--texte-doux').trim();
+  table.tenu = calcule.getPropertyValue('--texte-tenu').trim();
+  table.surface = calcule.getPropertyValue('--surface').trim();
+  table.bordure = calcule.getPropertyValue('--bordure').trim();
+  table.accent = calcule.getPropertyValue('--accent').trim();
+  return table;
 }
 
-/** Un écart suppose un vote exprimé, et une position de groupe à laquelle se comparer. */
-function estEcart(scrutin, rangDepute) {
-  const v = voteDe(scrutin, rangDepute);
-  if (!'pca'.includes(v) || !scrutin.groupe.position) return false;
-  return v !== scrutin.groupe.position[0];
-}
+/* ------------------------------------------------------------- Selection */
 
-/** Les votes dont on communique : les votes structurants, et ceux qui ont
-    effectivement modifie le texte avec le soutien du groupe. Un rejet conforme
-    a la position du groupe est l'ordinaire du debat budgetaire, pas un fait
-    marquant : l'y inclure noierait les quelques centaines de votes qui comptent
-    sous les milliers qui n'en disent rien. */
-function estMarquant(scrutin) {
-  if (scrutin.solennel) return true;
-  if (scrutin.categorie === 'ensemble' || scrutin.categorie === 'motion') return true;
-  return scrutin.sort === 'adopté' && scrutin.groupe.position === 'pour';
-}
-
-/** Les votes structurants passent devant, puis les plus récents. */
-function parImportance(a, b) {
-  const poids = (s) => (s.categorie === 'ensemble' ? 3 : s.categorie === 'motion' ? 2 : s.solennel ? 2 : 1);
-  return poids(b) - poids(a) || b.date.localeCompare(a.date) || b.numero - a.numero;
-}
-
-/* ------------------------------------------------------------- Ouverture */
-
-async function empreinte(texte) {
-  const octets = new TextEncoder().encode(texte);
-  const brut = await crypto.subtle.digest('SHA-256', octets);
-  return Array.from(new Uint8Array(brut)).map((o) => o.toString(16).padStart(2, '0')).join('');
-}
-
-function installerPorte() {
-  const porte = $('#porte');
-  porte.hidden = false;
-  $('#porte-mdp').focus();
-  $('#porte-form').addEventListener('submit', async (evt) => {
-    evt.preventDefault();
-    const saisie = $('#porte-mdp').value;
-    if (await empreinte(saisie) === window.CONFIG.empreinteMotDePasse) {
-      try { sessionStorage.setItem(CLE_SESSION, '1'); } catch (_) { /* navigation privée */ }
-      porte.hidden = true;
-      demarrer();
-    } else {
-      $('#porte-erreur').hidden = false;
-      $('#porte-mdp').select();
-    }
-  });
-}
-
-/* ------------------------------------------------------------- Filtrage */
-
-function lireFiltres() {
+function lireSelection() {
   return {
-    recherche: normaliser($('#f-recherche').value.trim()),
+    sujet: $('input[name="sujet"]:checked').value,
+    groupe: Number($('#f-groupe').value),
+    depute: $('#f-depute').value === '' ? -1 : Number($('#f-depute').value),
+    perimetre: $('input[name="perimetre"]:checked').value,
     texte: $('#f-texte').value,
-    categorie: $('#f-categorie').value,
-    position: $('#f-position').value,
-    sort: $('#f-sort').value,
-    depute: $('#f-depute').value,
-    marquants: $('#f-marquants').checked,
-    ecarts: $('#f-ecarts').checked,
+    debut: $('#f-debut').value,
+    fin: $('#f-fin').value,
+    nature: $('#f-nature').value,
+    issue: $('#f-issue').value,
+    recherche: normaliser($('#f-recherche').value.trim()),
   };
 }
 
-function filtrer() {
-  const f = lireFiltres();
-  const rang = f.depute ? Number(f.depute) : -1;
-  const mots = f.recherche ? f.recherche.split(/\s+/).filter(Boolean) : [];
-
-  return etat.donnees.scrutins.filter((s) => {
-    if (f.texte && s.texte !== f.texte) return false;
-    if (f.categorie && s.categorie !== f.categorie) return false;
-    if (f.position && s.groupe.position !== f.position) return false;
-    if (f.sort && s.sort !== f.sort) return false;
-    if (f.marquants && !estMarquant(s)) return false;
-    if (rang >= 0) {
-      if (!'pca'.includes(voteDe(s, rang))) return false;
-      if (f.ecarts && !estEcart(s, rang)) return false;
-    } else if (f.ecarts) {
-      // Sans député choisi, on garde les scrutins où au moins un s’est écarté.
-      if (!etat.donnees.deputes.some((_, i) => estEcart(s, i))) return false;
+function filtrer(selection) {
+  const mots = selection.recherche ? selection.recherche.split(/\s+/).filter(Boolean) : [];
+  const rangs = [];
+  etat.index.scrutins.forEach((scrutin, rang) => {
+    if (selection.perimetre === 'texte') {
+      if (selection.texte && scrutin.t !== selection.texte) return;
+    } else {
+      if (selection.debut && scrutin.d < selection.debut) return;
+      if (selection.fin && scrutin.d > selection.fin) return;
     }
+    if (selection.nature && scrutin.c !== selection.nature) return;
+    if (selection.issue && scrutin.s !== selection.issue) return;
     if (mots.length) {
-      if (!s._index) {
-        s._index = normaliser([
-          s.objet,
-          s.amendement ? s.amendement.auteur + ' ' + s.amendement.numero : '',
-          s.resume ? s.resume.resume : '',
-          s.article || '',
-        ].join(' '));
-      }
-      if (!mots.every((m) => s._index.includes(m))) return false;
+      if (!scrutin._i) scrutin._i = normaliser(scrutin.o);
+      if (!mots.every((m) => scrutin._i.includes(m))) return;
     }
-    return true;
+    rangs.push(rang);
   });
+  return rangs;
 }
 
-/* ------------------------------------------------------------- Rendu */
+/* ------------------------------------------------------------ Agregation */
 
-function ligneScrutin(scrutin) {
-  const position = scrutin.groupe.position || 'sans position';
-  const g = scrutin.groupe;
-  const a = scrutin.assemblee;
-  const deplie = etat.deplies.has(scrutin.numero);
-
-  const etiquettes = [
-    `<span class="etiquette">${echapper(LIBELLE_CATEGORIE[scrutin.categorie] || scrutin.categorie)}</span>`,
-    scrutin.solennel ? '<span class="etiquette solennel">Scrutin solennel</span>' : '',
-    `<span class="etiquette ${echapper(position)}">Groupe&nbsp;: ${echapper(position)}</span>`,
-  ].join('');
-
-  let detail = '';
-  if (deplie) {
-    const votants = etat.donnees.deputes.map((d, i) => {
-      const v = voteDe(scrutin, i);
-      if (v === '-') return '';
-      const ecart = estEcart(scrutin, i) ? ' ecart' : '';
-      const titre = estEcart(scrutin, i) ? ` title="S’écarte de la position du groupe"` : '';
-      return `<span class="votant ${v}${ecart}"${titre}>${echapper(d.prenom)} ${echapper(d.nom)} — ${LIBELLE_VOTE[v]}</span>`;
-    }).join('');
-
-    detail = `<div class="detail"><h4>Vote de chaque député</h4><div class="votants">${votants}</div></div>`;
-
-    if (scrutin.mep) {
-      const corrections = etat.donnees.deputes.map((d, i) => {
-        const v = scrutin.mep[i];
-        if (!v || v === '-') return '';
-        return `<span class="votant ${v}">${echapper(d.prenom)} ${echapper(d.nom)} — souhaitait voter ${LIBELLE_VOTE[v]}</span>`;
-      }).filter(Boolean).join('');
-      if (corrections) {
-        detail += `<div class="detail"><h4>Mises au point déposées</h4><div class="votants">${corrections}</div>
-          <p class="scrutin-resume">Une mise au point est déclarative : elle figure au compte rendu mais ne modifie pas le résultat proclamé.</p></div>`;
-      }
+/** Repartition des positions du sujet sur les scrutins retenus. */
+function repartitionSujet(selection, rangs) {
+  const compte = { p: 0, c: 0, a: 0, n: 0, x: 0, s: 0 };
+  if (selection.sujet === 'groupe') {
+    for (const rang of rangs) {
+      const entree = etat.index.scrutins[rang].g[selection.groupe];
+      if (!entree) continue;   // le groupe n'existait pas, ou ventilation absente
+      compte[POSITIONS[entree[0]] || 's'] += 1;
     }
-
-    if (scrutin.resume && scrutin.resume.expose) {
-      detail += `<div class="detail"><h4>Exposé</h4><p class="scrutin-objet">${echapper(scrutin.resume.expose)}</p></div>`;
+  } else if (etat.nominatif) {
+    for (const rang of rangs) {
+      const vote = etat.nominatif.votes[rang][selection.depute];
+      compte[vote === '-' ? 'x' : vote] += 1;
     }
   }
-
-  const lienAN = `https://www.assemblee-nationale.fr/dyn/${etat.donnees.legislature}/scrutins/${scrutin.numero}`;
-  const lienResume = scrutin.resume && scrutin.resume.url
-    ? ` · <a href="${echapper(scrutin.resume.url)}" rel="noopener" target="_blank">Fiche amendement</a>` : '';
-
-  return `<li class="scrutin pos-${echapper(position)}" data-numero="${scrutin.numero}">
-    <div class="scrutin-haut">
-      <span>${dateLongue(scrutin.date)}</span>
-      <span>·</span>
-      <span>Scrutin n°&nbsp;${scrutin.numero}</span>
-      <span>·</span>
-      <span>${echapper(scrutin.sort === 'adopté' ? 'Adopté' : 'Rejeté')}</span>
-      ${etiquettes}
-    </div>
-    <p class="scrutin-objet">${echapper(scrutin.objet)}</p>
-    ${scrutin.resume && scrutin.resume.resume ? `<p class="scrutin-resume">${echapper(scrutin.resume.resume)}</p>` : ''}
-    <div class="scrutin-bas">
-      <span>${g.pour + g.contre + g.abstention + g.nonVotants === 0
-        ? 'Aucun député du groupe n’a pris part à ce scrutin'
-        : `Groupe&nbsp;: ${g.pour} pour, ${g.contre} contre, ${g.abstention} abstention${g.abstention > 1 ? 's' : ''}`}</span>
-      <span>Assemblée&nbsp;: ${nombre(a.pour)} pour, ${nombre(a.contre)} contre</span>
-      <button class="detail-bascule" data-bascule="${scrutin.numero}">${deplie ? 'Masquer le détail' : 'Voir le vote de chacun'}</button>
-      <a href="${lienAN}" rel="noopener" target="_blank">Scrutin sur le site de l’Assemblée</a>${lienResume}
-    </div>
-    ${detail}
-  </li>`;
+  compte.total = compte.p + compte.c + compte.a + compte.n + compte.x + compte.s;
+  return compte;
 }
 
-function rendreScrutins() {
-  const resultats = filtrer();
-  etat.resultats = resultats;
+/** Une ligne par groupe, plus le depute en tete lorsqu'il est le sujet. */
+function repartitionGroupes(selection, rangs) {
+  const lignes = etat.index.groupes.map((groupe, indice) => {
+    const compte = { p: 0, c: 0, a: 0, s: 0, total: 0 };
+    for (const rang of rangs) {
+      const entree = etat.index.scrutins[rang].g[indice];
+      if (!entree) continue;
+      compte[POSITIONS[entree[0]] || 's'] += 1;
+      compte.total += 1;
+    }
+    return { nom: groupe.sigle, titre: groupe.libelle, compte, indice };
+  }).filter((ligne) => ligne.compte.total > 0);
 
-  $('#compte').textContent = resultats.length === 0
-    ? 'Aucun scrutin ne correspond à ces critères.'
-    : `${nombre(resultats.length)} scrutin${resultats.length > 1 ? 's' : ''} sur ${nombre(etat.donnees.scrutins.length)}`;
-
-  const liste = $('#liste');
-  if (resultats.length === 0) {
-    liste.innerHTML = '<li class="vide">Aucun résultat. Élargissez les critères ou réinitialisez les filtres.</li>';
-    $('#btn-plus').hidden = true;
-    return;
-  }
-
-  // Du plus récent au plus ancien : c’est l’actualité qui sert à communiquer.
-  const tri = resultats.slice().reverse();
-  liste.innerHTML = tri.slice(0, etat.affiches).map(ligneScrutin).join('');
-  const reste = tri.length - etat.affiches;
-  const bouton = $('#btn-plus');
-  bouton.hidden = reste <= 0;
-  if (reste > 0) bouton.textContent = `Afficher la suite (${nombre(reste)} restant${reste > 1 ? 's' : ''})`;
-}
-
-/* ------------------------------------------------------------- Députés */
-
-function statistiquesDepute(rang, cleTexte) {
-  const depute = etat.donnees.deputes[rang];
-  // Le denominateur ne retient que les scrutins tenus pendant l'appartenance
-  // au groupe : sans cela, un depute arrive en cours de legislature afficherait
-  // un taux ecrase par des scrutins auxquels il ne pouvait pas prendre part.
-  const debut = depute.dateDebut || '0000-00-00';
-  const fin = depute.dateFin || '9999-99-99';
-  const scrutins = etat.donnees.scrutins.filter(
-    (s) => (!cleTexte || s.texte === cleTexte) && s.date >= debut && s.date <= fin
-  );
-
-  const compte = { p: 0, c: 0, a: 0, n: 0, '-': 0 };
-  let ecarts = 0;
-  const listeEcarts = [];
-  for (const s of scrutins) {
-    const v = voteDe(s, rang);
-    compte[v] = (compte[v] || 0) + 1;
-    if (estEcart(s, rang)) { ecarts += 1; listeEcarts.push(s); }
-  }
-  const exprimes = compte.p + compte.c + compte.a;
-  const presents = exprimes + compte.n;
-  const part = scrutins.length ? Math.round((presents / scrutins.length) * 100) : 0;
-  return { scrutins, compte, exprimes, presents, ecarts, listeEcarts, total: scrutins.length, part };
-}
-
-const cacheReferences = new Map();
-
-/** Reperes de lecture du groupe. Un taux individuel ne veut rien dire dans
-    l'absolu : sur un texte budgetaire, une dizaine de deputes seulement prennent
-    part a chaque scrutin, le groupe se relayant au fil de seances qui durent des
-    semaines. On donne donc la mediane des membres et la presence moyenne. */
-function referencesGroupe(cleTexte) {
-  if (cacheReferences.has(cleTexte)) return cacheReferences.get(cleTexte);
-
-  const parts = etat.donnees.deputes
-    .map((d, i) => ({ d, st: statistiquesDepute(i, cleTexte) }))
-    .filter(({ st }) => st.total > 0)
-    .map(({ st }) => st.part)
-    .sort((a, b) => a - b);
-
-  const scrutins = etat.donnees.scrutins.filter((s) => !cleTexte || s.texte === cleTexte);
-  const presents = scrutins.map((s) => Array.from(s.votes).filter((c) => c !== '-').length);
-
-  const reference = {
-    mediane: parts.length ? parts[Math.floor(parts.length / 2)] : 0,
-    presenceMoyenne: presents.length
-      ? Math.round(presents.reduce((a, b) => a + b, 0) / presents.length) : 0,
-  };
-  cacheReferences.set(cleTexte, reference);
-  return reference;
-}
-
-function rendreDeputes() {
-  const recherche = normaliser($('#f-depute-recherche').value.trim());
-  const cleTexte = $('#f-depute-texte').value;
-  const actifsSeuls = $('#f-depute-actifs').checked;
-
-  const cartes = etat.donnees.deputes.map((d, rang) => ({ d, rang }))
-    .filter(({ d }) => {
-      if (actifsSeuls && d.dateFin) return false;
-      if (!recherche) return true;
-      const circo = d.circonscription ? d.circonscription.departement : '';
-      return normaliser(`${d.prenom} ${d.nom} ${circo}`).includes(recherche);
-    })
-    .map(({ d, rang }) => {
-      const st = statistiquesDepute(rang, cleTexte);
-      const circo = libelleCirco(d);
-      return `<button class="carte-depute" data-depute="${rang}">
-        <h3>${echapper(d.prenom)} ${echapper(d.nom)}${d.dateFin ? '<span class="partie">a quitté le groupe</span>' : ''}</h3>
-        <p class="circo">${echapper(circo)}</p>
-        <div class="chiffres">
-          <div><strong>${nombre(st.exprimes)}</strong>votes exprimés</div>
-          <div><strong>${st.part}&nbsp;%</strong>des scrutins de sa période</div>
-          <div><strong>${nombre(st.ecarts)}</strong>écart${st.ecarts > 1 ? 's' : ''}</div>
-        </div>
-      </button>`;
+  if (selection.sujet === 'depute' && etat.nominatif && selection.depute >= 0) {
+    const depute = etat.index.deputes[selection.depute];
+    const compte = repartitionSujet(selection, rangs);
+    lignes.unshift({
+      nom: `${depute.prenom} ${depute.nom}`,
+      titre: `${depute.prenom} ${depute.nom}`,
+      compte: { p: compte.p, c: compte.c, a: compte.a, s: compte.n + compte.x, total: compte.total },
+      surbrillance: true,
     });
-
-  $('#grille-deputes').innerHTML = cartes.length
-    ? cartes.join('')
-    : '<p class="vide">Aucun député ne correspond à cette recherche.</p>';
-}
-
-function ouvrirFicheDepute(rang) {
-  const d = etat.donnees.deputes[rang];
-  const cleTexte = $('#f-depute-texte').value;
-  const texte = etat.donnees.textes.find((t) => t.cle === cleTexte);
-  const st = statistiquesDepute(rang, cleTexte);
-  const reference = referencesGroupe(cleTexte);
-  const fidelite = st.exprimes ? Math.round(((st.exprimes - st.ecarts) / st.exprimes) * 100) : 0;
-
-  const circo = libelleCirco(d);
-
-  const marquants = st.scrutins.filter(estMarquant)
-    .filter((s) => 'pca'.includes(voteDe(s, rang)))
-    .sort(parImportance).slice(0, 25);
-
-  const ligne = (s) => `<tr>
-    <td>${dateCourte(s.date)}</td>
-    <td>${echapper(s.objet)}</td>
-    <td><strong>${LIBELLE_VOTE[voteDe(s, rang)]}</strong></td>
-    <td>${echapper(s.sort === 'adopté' ? 'Adopté' : 'Rejeté')}</td>
-  </tr>`;
-
-  $('#fiche-carte').innerHTML = `
-    <header class="fiche-entete">
-      <div>
-        <h2>${echapper(d.prenom)} ${echapper(d.nom)}</h2>
-        <p class="fiche-sous">${echapper(circo)}${circo ? ' · ' : ''}Groupe Horizons &amp; Indépendants${d.dateFin ? ` (jusqu’au ${dateLongue(d.dateFin)})` : ''}</p>
-      </div>
-      <button class="bouton-fermer" data-fermer aria-label="Fermer">&times;</button>
-    </header>
-
-    <p class="fiche-sous">Périmètre&nbsp;: ${texte ? echapper(texte.libelle) : 'ensemble des textes financiers'}, ${nombre(st.total)} scrutin${st.total > 1 ? 's' : ''} publics.</p>
-
-    <h3>Présence et positions</h3>
-    <div class="stats">
-      <div class="stat"><strong>${nombre(st.exprimes)}</strong><span>votes exprimés</span></div>
-      <div class="stat"><strong>${st.part}&nbsp;%</strong><span>des scrutins de sa période</span></div>
-      <div class="stat"><strong>${nombre(st.compte.p)}</strong><span>pour</span></div>
-      <div class="stat"><strong>${nombre(st.compte.c)}</strong><span>contre</span></div>
-      <div class="stat"><strong>${nombre(st.compte.a)}</strong><span>abstentions</span></div>
-      <div class="stat"><strong>${fidelite}&nbsp;%</strong><span>conformité à la ligne du groupe</span></div>
-    </div>
-    <p class="fiche-sous" style="margin-top:12px">
-      Repère&nbsp;: sur ce périmètre, ${reference.presenceMoyenne} députés du groupe en moyenne
-      prennent part à chaque scrutin, et la médiane des membres s’établit à ${reference.mediane}&nbsp;%.
-      Les débats budgétaires s’étirant sur des semaines, le groupe s’y relaie&nbsp;; ces taux se
-      lisent les uns par rapport aux autres, non dans l’absolu.
-    </p>
-
-    <h3>Votes marquants (${marquants.length})</h3>
-    ${marquants.length
-      ? `<table><thead><tr><th>Date</th><th>Objet</th><th>Son vote</th><th>Issue</th></tr></thead><tbody>${marquants.map(ligne).join('')}</tbody></table>`
-      : '<p class="fiche-sous">Aucun vote marquant sur ce périmètre.</p>'}
-
-    ${st.listeEcarts.length
-      ? `<h3>Écarts avec la position du groupe (${nombre(st.ecarts)})</h3>
-         <table><thead><tr><th>Date</th><th>Objet</th><th>Son vote</th><th>Groupe</th></tr></thead><tbody>${
-           st.listeEcarts.slice(-15).reverse().map((s) => `<tr>
-             <td>${dateCourte(s.date)}</td>
-             <td>${echapper(s.objet)}</td>
-             <td><strong>${LIBELLE_VOTE[voteDe(s, rang)]}</strong></td>
-             <td>${echapper(s.groupe.position)}</td>
-           </tr>`).join('')}</tbody></table>`
-      : ''}
-
-    <p class="fiche-sous" style="margin-top:24px">Source&nbsp;: scrutins publics de l’Assemblée nationale, données au ${dateLongue(etat.donnees.genereLe.slice(0, 10))}.</p>
-
-    <div class="fiche-actions">
-      <button class="bouton-primaire" onclick="window.print()">Imprimer ou enregistrer en PDF</button>
-      <button class="bouton-discret" data-fermer>Fermer</button>
-    </div>`;
-
-  $('#fiche').hidden = false;
-}
-
-/* ------------------------------------------------------- Élément de langage */
-
-/* L'element de langage est redige en prose suivie : c'est un texte destine a
-   etre repris dans une note ou une intervention, pas un tableau. On s'astreint
-   donc a l'accord des reprises pronominales et a ne pas repeter la date a
-   chaque phrase, deux details dont l'absence trahit immediatement un texte
-   fabrique par une machine. */
-
-/** Accord de la reprise sur l'objet du scrutin : « la motion […] elle a ete
-    rejetee », « les credits […] ils ont ete adoptes ». */
-function accordObjet(objet) {
-  if (/^les\s/i.test(objet)) return { pronom: 'ils', marque: 's', auxiliaire: 'ont' };
-  if (/^la\s/i.test(objet)) return { pronom: 'elle', marque: 'e', auxiliaire: 'a' };
-  return { pronom: 'il', marque: '', auxiliaire: 'a' };
-}
-
-/** Quand la selection porte sur un texte unique, son intitule est deja donne
-    par la phrase d'ouverture : le repeter a chaque scrutin alourdit sans rien
-    apprendre. On ne garde alors que la lecture, et seulement sur la premiere
-    mention d'une journee. */
-function nettoyerObjet(objet, texteUnique, avecLecture) {
-  let sortie = objet.replace(/\.$/, '').trim();
-  const lecture = (sortie.match(/\((nouvelle lecture|lecture définitive|première lecture|texte de la commission mixte paritaire)\)/i) || [])[1];
-  sortie = sortie.replace(/\s*\((première lecture|nouvelle lecture|lecture définitive|texte de la commission mixte paritaire)\)\s*$/i, '');
-  if (texteUnique) {
-    sortie = sortie.replace(/\s+d(?:u|e la) (?:projet|proposition) de loi\b.*$/i, '')
-                   .replace(/[,\s]+$/, '');   // la coupe peut laisser la virgule d'une incise
   }
-  if (avecLecture && lecture && !/^première lecture$/i.test(lecture)) {
-    sortie += ` (${lecture.toLowerCase()})`;
-  }
-  return sortie.trim();
+  return lignes;
 }
 
-/** « adopté par 104 voix contre 7 », accordé sur l'objet. */
-function mentionIssue(scrutin, objet) {
-  const { marque } = accordObjet(objet);
-  const verbe = (scrutin.sort === 'adopté' ? 'adopté' : 'rejeté') + marque;
-  const a = scrutin.assemblee;
-  if (a.pour + a.contre === 0) return verbe;
-  const fort = Math.max(a.pour, a.contre);
-  const faible = Math.min(a.pour, a.contre);
-  return `${verbe} par ${nombre(fort)} voix contre ${nombre(faible)}`;
-}
+/* ---------------------------------------------------------------- Figures */
 
-function descriptionScrutin(scrutin, texteUnique, avecLecture) {
-  const objet = nettoyerObjet(scrutin.objet, texteUnique, avecLecture);
-  return `${objet}, ${mentionIssue(scrutin, objet)}`;
-}
+/** Barre empilee horizontale. Un espace de 2 px separe les segments, et seuls
+    ceux qui ont la place recoivent leur valeur en clair. */
+function segments(compte, ordre, x, y, largeur, hauteur, teintes, unite) {
+  const total = ordre.reduce((somme, cle) => somme + (compte[cle] || 0), 0);
+  if (!total) return '';
+  const rayon = Math.min(4, hauteur / 2);
+  let curseur = x;
+  const morceaux = [];
+  const presents = ordre.filter((cle) => compte[cle] > 0);
 
-/** Le sujet de la phrase : le groupe, ou le député si la sélection en vise un. */
-function sujetEDL(depute) {
-  if (!depute) return { nom: 'le groupe', pronom: 'il', marque: '' };
-  const feminin = depute.civilite === 'Mme';
-  return {
-    nom: `${depute.prenom} ${depute.nom}`,
-    pronom: feminin ? 'elle' : 'il',
-    marque: feminin ? 'e' : '',
-  };
-}
-
-function positionRetenue(scrutin, rang) {
-  return rang >= 0 ? (LIBELLE_VOTE[voteDe(scrutin, rang)] || null) : scrutin.groupe.position;
-}
-
-/** Précision ajoutée quand le député s'écarte de la position de son groupe. */
-function mentionEcart(scrutin, rang) {
-  if (rang < 0 || !estEcart(scrutin, rang)) return '';
-  const g = scrutin.groupe.position;
-  return g === 'abstention' ? ', quand le groupe s’est abstenu' : `, quand le groupe a voté ${g}`;
-}
-
-function paragrapheMarquants(liste, depute, rang, texteUnique) {
-  const sujet = sujetEDL(depute);
-
-  // Regroupement par date : une seance fournit souvent plusieurs scrutins
-  // marquants, et les dater un par un donne un texte qui bégaie.
-  const journees = [];
-  for (const scrutin of liste) {
-    const derniere = journees[journees.length - 1];
-    if (derniere && derniere.date === scrutin.date) derniere.scrutins.push(scrutin);
-    else journees.push({ date: scrutin.date, scrutins: [scrutin] });
-  }
-
-  return journees.map(({ date, scrutins }) => {
-    const [premier, ...suivants] = scrutins;
-    const position = positionRetenue(premier, rang);
-    const ouverture = position === 'abstention'
-      ? `${sujet.nom} s’est abstenu${sujet.marque} sur ${descriptionScrutin(premier, texteUnique, true)}`
-      : `${sujet.nom} a voté ${position} ${descriptionScrutin(premier, texteUnique, true)}`;
-
-    let phrase = `Le ${dateLongue(date)}, ${ouverture}${mentionEcart(premier, rang)}.`;
-
-    if (suivants.length) {
-      const complements = suivants.map((scrutin) => {
-        const p = positionRetenue(scrutin, rang);
-        const corps = p === 'abstention'
-          ? `en s’abstenant sur ${descriptionScrutin(scrutin, texteUnique, false)}`
-          : `${p} ${descriptionScrutin(scrutin, texteUnique, false)}`;
-        return corps + mentionEcart(scrutin, rang);
-      });
-      const enumeration = complements.length > 1
-        ? complements.slice(0, -1).join(' ; ') + ', et ' + complements[complements.length - 1]
-        : complements[0];
-      const majuscule = sujet.pronom.charAt(0).toUpperCase() + sujet.pronom.slice(1);
-      phrase += ` ${majuscule} s’est également prononcé${sujet.marque} ${enumeration}.`;
+  presents.forEach((cle, position) => {
+    const part = compte[cle] / total;
+    const brut = part * largeur;
+    const espace = position < presents.length - 1 ? 2 : 0;
+    const large = Math.max(brut - espace, 1);
+    const premier = position === 0;
+    const dernier = position === presents.length - 1;
+    // Les extremites de la barre sont arrondies, les jonctions restent droites.
+    const d = cheminArrondi(curseur, y, large, hauteur, premier ? rayon : 0, dernier ? rayon : 0);
+    const titre = `${LIBELLES[cle]} : ${nombre(compte[cle])} ${unite}${compte[cle] > 1 ? 's' : ''} (${Math.round(part * 100)} %)`;
+    morceaux.push(
+      `<path d="${d}" fill="${teintes[cle]}" data-bulle="${echapper(titre)}"><title>${echapper(titre)}</title></path>`
+    );
+    if (brut >= 38) {
+      const centre = curseur + large / 2;
+      morceaux.push(
+        `<text x="${centre.toFixed(1)}" y="${(y + hauteur / 2 + 4).toFixed(1)}" text-anchor="middle"` +
+        ` font-size="11.5" font-weight="600" fill="${lisible(cle, teintes)}" pointer-events="none">` +
+        `${Math.round(part * 100)} %</text>`
+      );
     }
-    return phrase;
-  }).join(' ');
+    curseur += brut;
+  });
+  return morceaux.join('');
+}
+
+/** Le texte porte une encre lisible sur son segment, jamais la couleur de serie. */
+function lisible(cle, teintes) {
+  return (cle === 'n' || cle === 'x' || cle === 's' || cle === 'a')
+    ? teintes.texte : teintes.surface;
+}
+
+function cheminArrondi(x, y, largeur, hauteur, gauche, droite) {
+  const g = Math.min(gauche, largeur / 2);
+  const d = Math.min(droite, largeur / 2);
+  return `M${(x + g).toFixed(1)},${y} H${(x + largeur - d).toFixed(1)}` +
+    (d ? ` a${d},${d} 0 0 1 ${d},${d}` : '') +
+    ` V${(y + hauteur - d).toFixed(1)}` +
+    (d ? ` a${d},${d} 0 0 1 ${-d},${d}` : '') +
+    ` H${(x + g).toFixed(1)}` +
+    (g ? ` a${g},${g} 0 0 1 ${-g},${-g}` : '') +
+    ` V${(y + g).toFixed(1)}` +
+    (g ? ` a${g},${g} 0 0 1 ${g},${-g}` : '') + ' Z';
+}
+
+function legende(ordre, x, y, teintes, compte) {
+  let curseur = x;
+  return ordre.filter((cle) => !compte || compte[cle] > 0).map((cle) => {
+    const morceau =
+      `<rect x="${curseur}" y="${y - 8}" width="10" height="10" rx="2" fill="${teintes[cle]}"/>` +
+      `<text x="${curseur + 15}" y="${y}" font-size="12" fill="${teintes.doux}">${LIBELLES[cle]}</text>`;
+    curseur += 15 + LIBELLES[cle].length * 6.6 + 16;
+    return morceau;
+  }).join('');
+}
+
+const ENTETE_SVG = 'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif"';
+
+/* Les figures sont tracees aux dimensions reelles de leur conteneur plutot
+   qu'etirees depuis un gabarit fixe : une mise a l'echelle grossit aussi les
+   etiquettes, qui deviennent enormes sur grand ecran et illisibles sur
+   telephone. Le rendu est refait a chaque changement de largeur. */
+
+function figureSujet(selection, rangs, L) {
+  const teintes = couleurs();
+  const compte = repartitionSujet(selection, rangs);
+  const ordre = selection.sujet === 'depute' ? ['p', 'a', 'c', 'n', 'x'] : ['p', 'a', 'c', 's'];
+  const marge = 2;
+  const H = 92;
+  if (!compte.total) {
+    return svgRacine(L, 40, `<text x="0" y="22" font-size="13" fill="${teintes.doux}">Aucun vote sur cette sélection.</text>`);
+  }
+  return svgRacine(L, H,
+    segments(compte, ordre, marge, 6, L - marge * 2, 36, teintes, 'scrutin') +
+    legende(ordre, marge, 68, teintes, compte) +
+    `<text x="${marge}" y="88" font-size="11" fill="${teintes.tenu}">${nombre(compte.total)} scrutins retenus</text>`);
+}
+
+function figureGroupes(selection, rangs, L) {
+  const teintes = couleurs();
+  const lignes = repartitionGroupes(selection, rangs);
+  // La colonne des noms se resserre sur telephone sans jamais devenir illisible.
+  const colonne = Math.round(Math.min(140, Math.max(66, L * 0.27)));
+  const hauteurLigne = 26, ecart = 6;
+  if (!lignes.length) {
+    return svgRacine(L, 40, `<text x="0" y="22" font-size="13" fill="${teintes.doux}">Aucune ventilation par groupe sur cette sélection.</text>`);
+  }
+  const H = lignes.length * (hauteurLigne + ecart) + 46;
+  const maxCaracteres = Math.max(6, Math.floor((colonne - 34) / 6.6));
+  const barres = lignes.map((ligne, rang) => {
+    const y = rang * (hauteurLigne + ecart);
+    const gras = ligne.surbrillance ? ' font-weight="700"' : '';
+    const nom = ligne.nom.length > maxCaracteres ? ligne.nom.slice(0, maxCaracteres - 1) + '…' : ligne.nom;
+    return `<text x="0" y="${y + 17}" font-size="12"${gras} fill="${teintes.texte}">${echapper(nom)}</text>` +
+      `<text x="${colonne - 10}" y="${y + 17}" font-size="11" text-anchor="end" fill="${teintes.tenu}">${nombre(ligne.compte.total)}</text>` +
+      segments(ligne.compte, ['p', 'a', 'c', 's'], colonne, y + 4, L - colonne, hauteurLigne - 8, teintes, 'scrutin');
+  }).join('');
+  const cumul = lignes.reduce((total, ligne) => {
+    for (const cle of ['p', 'a', 'c', 's']) total[cle] += ligne.compte[cle] || 0;
+    return total;
+  }, { p: 0, a: 0, c: 0, s: 0 });
+  return svgRacine(L, H, barres +
+    legende(['p', 'a', 'c', 's'], 0, H - 24, teintes, cumul) +
+    `<text x="0" y="${H - 5}" font-size="11" fill="${teintes.tenu}">Le nombre en tête de ligne est le total des scrutins où le groupe avait une position.</text>`);
+}
+
+function svgRacine(largeur, hauteur, contenu) {
+  return `<svg width="${largeur}" height="${hauteur}" viewBox="0 0 ${largeur} ${hauteur}" ` +
+    `${ENTETE_SVG} role="img">${contenu}</svg>`;
+}
+
+/** Largeur utile d'une toile, bornee pour rester tracable avant disposition. */
+function largeurToile(identifiant) {
+  const element = document.getElementById(identifiant);
+  return Math.max(280, Math.round(element ? element.clientWidth : 720));
+}
+
+/* ------------------------------------------------------------ Export PNG */
+
+function titreSelection(selection, rangs) {
+  const sujet = selection.sujet === 'groupe'
+    ? etat.index.groupes[selection.groupe].libelle
+    : (selection.depute >= 0
+      ? `${etat.index.deputes[selection.depute].prenom} ${etat.index.deputes[selection.depute].nom}`
+      : 'Aucun député sélectionné');
+  let perimetre, phrase;
+  if (selection.perimetre === 'texte' && selection.texte) {
+    const texte = etat.index.textes.find((t) => t.cle === selection.texte);
+    perimetre = texte ? texte.libelle : 'texte inconnu';
+    // « la proposition de loi… » mais « le projet de loi… » : l'accord se lit
+    // dans la nature du texte, pas dans son intitulé.
+    const article = texte && /^proposition/i.test(texte.nature) ? 'la' : 'le';
+    phrase = texte ? `${article} ${perimetre.charAt(0).toLowerCase() + perimetre.slice(1)}` : perimetre;
+  } else if (selection.perimetre === 'periode' && (selection.debut || selection.fin)) {
+    perimetre = `du ${selection.debut ? dateLongue(selection.debut) : 'début de la législature'} au ${selection.fin ? dateLongue(selection.fin) : 'dernier scrutin'}`;
+    phrase = `la période allant ${perimetre}`;
+  } else {
+    perimetre = 'ensemble de la XVIIe législature';
+    phrase = "l'ensemble de la XVIIe législature";
+  }
+  return { sujet, perimetre, phrase, scrutins: rangs.length };
+}
+
+const LARGEUR_EXPORT = 880;
+
+/** L'image exportee est retracee a une largeur fixe : elle ne doit pas dependre
+    de la taille de la fenetre au moment du clic. */
+async function exporterPNG(idFigure) {
+  const section = document.getElementById(idFigure);
+  const teintes = couleurs();
+  const selection = lireSelection();
+  const { sujet, perimetre } = titreSelection(selection, etat.rangs);
+  const titre = section.querySelector('h2').textContent;
+
+  const dessin = idFigure === 'figure-sujet'
+    ? figureSujet(selection, etat.rangs, LARGEUR_EXPORT)
+    : figureGroupes(selection, etat.rangs, LARGEUR_EXPORT);
+  const hauteurGraphe = Number((dessin.match(/height="(\d+)"/) || [0, 200])[1]);
+  const interieur = dessin.replace(/^<svg[^>]*>/, '').replace(/<\/svg>$/, '');
+
+  const hautTitre = 66, bas = 28, cote = 24;
+  const L = LARGEUR_EXPORT + cote * 2;
+  const H = hauteurGraphe + hautTitre + bas;
+  const sousTitre = idFigure === 'figure-sujet' ? `${sujet} — ${perimetre}` : perimetre;
+
+  const compose =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${L * 2}" height="${H * 2}" ` +
+    `viewBox="0 0 ${L} ${H}" ${ENTETE_SVG}>` +
+    `<rect width="100%" height="100%" fill="${teintes.surface}"/>` +
+    `<text x="${cote}" y="28" font-size="17" font-weight="700" fill="${teintes.texte}">${echapper(titre)}</text>` +
+    `<text x="${cote}" y="48" font-size="12.5" fill="${teintes.doux}">${echapper(sousTitre.length > 110 ? sousTitre.slice(0, 109) + '…' : sousTitre)}</text>` +
+    `<g transform="translate(${cote},${hautTitre})">${interieur}</g>` +
+    `<text x="${cote}" y="${H - 10}" font-size="10.5" fill="${teintes.tenu}">` +
+    `Source : data.assemblee-nationale.fr, Licence Ouverte — données au ${dateLongue(etat.index.genereLe.slice(0, 10))}</text>` +
+    '</svg>';
+
+  const blob = new Blob([compose], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  try {
+    const image = await new Promise((resoudre, rejeter) => {
+      const img = new Image();
+      img.onload = () => resoudre(img);
+      img.onerror = () => rejeter(new Error('rendu impossible'));
+      img.src = url;
+    });
+    const toile = document.createElement('canvas');
+    toile.width = L * 2;
+    toile.height = H * 2;
+    const contexte = toile.getContext('2d');
+    contexte.fillStyle = teintes.surface;
+    contexte.fillRect(0, 0, toile.width, toile.height);
+    contexte.drawImage(image, 0, 0, toile.width, toile.height);
+    await new Promise((resoudre) => toile.toBlob((sortie) => {
+      const lien = document.createElement('a');
+      lien.href = URL.createObjectURL(sortie);
+      lien.download = `votes-${normaliser(sujet).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)}-${new Date().toISOString().slice(0, 10)}.png`;
+      lien.click();
+      URL.revokeObjectURL(lien.href);
+      resoudre();
+    }, 'image/png'));
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/* --------------------------------------------------------- Note et EDL */
+
+function partDominante(compte) {
+  const ordre = [['p', 'pour'], ['c', 'contre'], ['a', 'abstention']]
+    .map(([cle, mot]) => ({ cle, mot, n: compte[cle] || 0 }))
+    .sort((a, b) => b.n - a.n);
+  return ordre[0];
 }
 
 function enumererFr(elements) {
@@ -531,132 +384,292 @@ function enumererFr(elements) {
   return elements.slice(0, -1).join(', ') + ' et ' + elements[elements.length - 1];
 }
 
-/** On enonce la repartition reelle des divergences plutot que d'en deduire une
-    tendance a partir du dernier cas rencontre. */
-function phraseEcarts(st) {
-  const repartition = { pour: 0, contre: 0, abstention: 0 };
-  for (const s of st.listeEcarts) if (s.groupe.position) repartition[s.groupe.position] += 1;
-
-  const detail = Object.entries(repartition)
-    .filter(([, n]) => n > 0)
-    .sort((a, b) => b[1] - a[1])
-    .map(([position, n], i) => {
-      // Le groupe n'est nomme qu'une fois, la reprise pronominale suffit ensuite.
-      const sujet = i === 0 ? 'le groupe' : 'il';
-      return position === 'abstention'
-        ? `${nombre(n)} où ${sujet} s’était abstenu`
-        : `${nombre(n)} où ${sujet} avait voté ${position}`;
-    });
-
-  return `Ses ${nombre(st.ecarts)} votes divergents se répartissent entre ${enumererFr(detail)}.`;
+/** Les votes structurants d'abord, puis les plus recents. Le rang est
+    conserve : le retrouver ensuite couterait un parcours complet par scrutin. */
+function marquants(rangs, limite) {
+  const poids = (s) => (s.c === 'ensemble du texte' ? 4 : s.c === 'motion de censure' ? 3
+    : s.solennel ? 3 : s.c === 'motion de procédure' ? 2 : 1);
+  return rangs.map((rang) => ({ scrutin: etat.index.scrutins[rang], rang }))
+    .sort((a, b) => poids(b.scrutin) - poids(a.scrutin) || b.scrutin.d.localeCompare(a.scrutin.d))
+    .slice(0, limite);
 }
 
-function composerEDL(resultats) {
-  const f = lireFiltres();
-  const d = etat.donnees;
-  if (!resultats.length) return 'La sélection ne contient aucun scrutin.';
+function positionSujet(scrutin, selection, rang) {
+  if (selection.sujet === 'groupe') {
+    const entree = scrutin.g[selection.groupe];
+    return entree ? POSITIONS[entree[0]] : null;
+  }
+  if (!etat.nominatif || selection.depute < 0) return null;
+  const vote = etat.nominatif.votes[rang][selection.depute];
+  return vote === '-' ? 'x' : vote;
+}
 
-  const texte = d.textes.find((t) => t.cle === f.texte);
-  const rang = f.depute ? Number(f.depute) : -1;
-  const depute = rang >= 0 ? d.deputes[rang] : null;
+/** Quand la selection porte sur un texte unique, son intitule figure deja dans
+    la phrase d'ouverture : le repeter a chaque vote donne un texte qui begaie.
+    On ne garde alors que la lecture, qui distingue les etapes entre elles. */
+function nettoyerObjet(objet, texteUnique) {
+  let sortie = objet.replace(/\.$/, '').trim();
+  const lecture = (sortie.match(/\((nouvelle lecture|lecture définitive|deuxième lecture|texte de la commission mixte paritaire)\)/i) || [])[1];
+  sortie = sortie.replace(/\s*\((?:première lecture|nouvelle lecture|deuxième lecture|lecture définitive|texte de la commission mixte paritaire)\)\s*$/i, '');
+  if (texteUnique) {
+    sortie = sortie.replace(/\s+d[eu]s?\s+(?:la\s+)?(?:projet|proposition) de loi\b.*$/i, '')
+                   .replace(/\s+de la proposition de résolution\b.*$/i, '')
+                   .replace(/[,\s]+$/, '');
+    // « l'ensemble » seul est trop elliptique une fois le texte retire.
+    if (/^l['’]ensemble$/i.test(sortie)) sortie += ' du texte';
+    if (lecture) sortie += ` (${lecture.toLowerCase()})`;
+  }
+  return sortie.trim();
+}
 
-  const premier = resultats[0];
-  const dernier = resultats[resultats.length - 1];
-  const compte = { pour: 0, contre: 0, abstention: 0 };
-  for (const s of resultats) if (s.groupe.position) compte[s.groupe.position] += 1;
+function phraseVote(scrutin, position, nom, marque, texteUnique) {
+  const objet = nettoyerObjet(scrutin.o, texteUnique);
+  const verbe = position === 'a' ? `s’est abstenu${marque} sur`
+    : position === 'p' ? 'a voté pour' : 'a voté contre';
+  // L'accord de l'issue suit l'objet : « la motion […] rejetée ».
+  const accord = /^l[ae]s\s/i.test(objet) ? 's' : /^la\s/i.test(objet) ? 'e' : '';
+  const issue = (scrutin.s === 'adopté' ? 'adopté' : 'rejeté') + accord;
+  const chiffres = scrutin.a[0] + scrutin.a[1] > 0
+    ? ` par ${nombre(Math.max(scrutin.a[0], scrutin.a[1]))} voix contre ${nombre(Math.min(scrutin.a[0], scrutin.a[1]))}` : '';
+  return `Le ${dateLongue(scrutin.d)}, ${nom} ${verbe} ${objet}, ${issue}${chiffres}.`;
+}
 
-  const perimetre = texte
-    ? `sur le ${texte.libelle.charAt(0).toLowerCase() + texte.libelle.slice(1)}`
-    : 'sur les textes financiers de la législature';
-  const periode = premier.date === dernier.date
-    ? `le ${dateLongue(premier.date)}`
-    : `entre le ${dateLongue(premier.date)} et le ${dateLongue(dernier.date)}`;
-  const pluriel = resultats.length > 1 ? 's' : '';
+/** Accord et reprise pronominale du sujet, groupe ou depute. */
+function accordSujet(selection) {
+  if (selection.sujet === 'groupe') return { pronom: 'il', marque: '' };
+  const depute = etat.index.deputes[selection.depute];
+  const feminin = depute && depute.civilite === 'Mme';
+  return { pronom: feminin ? 'elle' : 'il', marque: feminin ? 'e' : '' };
+}
+
+function composer(registre) {
+  const selection = lireSelection();
+  const rangs = etat.rangs;
+  if (!rangs.length) return 'La sélection ne contient aucun scrutin.';
+  const { sujet, phrase } = titreSelection(selection, rangs);
+  const compte = repartitionSujet(selection, rangs);
+  if (!compte.total) return 'Aucun vote du sujet retenu sur cette sélection.';
+
+  const { pronom, marque } = accordSujet(selection);
+  const texteUnique = selection.perimetre === 'texte' && Boolean(selection.texte);
+  const exprimes = compte.p + compte.c + compte.a;
+  const dominante = partDominante(compte);
+  const pourcentage = exprimes ? Math.round((dominante.n / exprimes) * 100) : 0;
+  const dates = rangs.map((r) => etat.index.scrutins[r].d);
+  const debut = dates[0], fin = dates[dates.length - 1];
+  const periode = debut === fin ? `le ${dateLongue(debut)}`
+    : `entre le ${dateLongue(debut)} et le ${dateLongue(fin)}`;
 
   const paragraphes = [];
 
-  if (depute) {
-    const sujet = sujetEDL(depute);
-    const st = statistiquesDepute(rang, f.texte);
-    const fidelite = st.exprimes ? Math.round(((st.exprimes - st.ecarts) / st.exprimes) * 100) : 0;
+  if (registre === 'note') {
     paragraphes.push(
-      `${sujet.nom} s’est prononcé${sujet.marque} ${perimetre} dans ${nombre(resultats.length)} ` +
-      `scrutin${pluriel} public${pluriel}, ${periode}. Sur ce périmètre, ${sujet.pronom} a voté pour ` +
-      `à ${nombre(st.compte.p)} reprises et contre à ${nombre(st.compte.c)}, s’abstenant ` +
-      `${nombre(st.compte.a)} fois, soit une conformité de ${fidelite} % à la position majoritaire ` +
-      `du groupe.` +
-      (st.ecarts ? ' ' + phraseEcarts(st) : '')
+      `Sur ${phrase}, ${sujet} s’est prononcé${marque} sur ${nombre(exprimes)} ` +
+      `scrutin${exprimes > 1 ? 's' : ''} public${exprimes > 1 ? 's' : ''}, ${periode}. ` +
+      `Les votes se répartissent en ${nombre(compte.p)} pour, ${nombre(compte.c)} contre et ` +
+      `${nombre(compte.a)} abstention${compte.a > 1 ? 's' : ''}` +
+      (selection.sujet === 'depute'
+        ? `, sur ${nombre(compte.total)} scrutins ouverts à son vote.`
+        : '.')
     );
+
+    // On donne l'amplitude reelle des positions plutot qu'un commentaire sur
+    // ce qu'elle signifierait.
+    const lignes = repartitionGroupes(selection, rangs)
+      .filter((l) => !l.surbrillance && l.compte.total >= 5);
+    if (lignes.length > 2) {
+      const part = (l) => l.compte.p / l.compte.total;
+      const trie = lignes.slice().sort((a, b) => part(b) - part(a));
+      const plus = trie[0], moins = trie[trie.length - 1];
+      paragraphes.push(
+        `Sur le même périmètre, la part de votes favorables s’échelonne de ` +
+        `${Math.round(part(plus) * 100)} % pour ${plus.titre} à ` +
+        `${Math.round(part(moins) * 100)} % pour ${moins.titre}, rapportée aux scrutins ` +
+        `où chaque groupe avait une position.`
+      );
+    }
   } else {
+    const verbe = dominante.mot === 'abstention'
+      ? `a choisi l’abstention` : `a voté ${dominante.mot}`;
     paragraphes.push(
-      `Le groupe Horizons & Indépendants s’est prononcé ${perimetre} dans ${nombre(resultats.length)} ` +
-      `scrutin${pluriel} public${pluriel}, ${periode}. Il a voté pour dans ${nombre(compte.pour)} cas, ` +
-      `contre dans ${nombre(compte.contre)}, et s’est abstenu à ${nombre(compte.abstention)} reprises.`
+      `Sur ${phrase}, ${sujet} ${verbe} dans ${pourcentage} % des scrutins où ` +
+      `${pronom} s’est prononcé${marque} : ${nombre(dominante.n)} votes sur ${nombre(exprimes)}, ${periode}.`
     );
   }
 
-  const marquants = resultats.filter(estMarquant).sort(parImportance).slice(0, 8);
-  if (marquants.length) paragraphes.push(paragrapheMarquants(marquants, depute, rang, f.texte));
-
-  const adoptes = resultats.filter((s) => s.sort === 'adopté' && s.groupe.position === 'pour'
-    && (s.categorie === 'amendement' || s.categorie === 'sous-amendement'));
-  if (adoptes.length) {
-    const articles = [];
-    for (const s of adoptes.slice().reverse()) {
-      const mention = s.article ? `l’article ${s.article}` : 'un article additionnel';
-      if (!articles.includes(mention)) articles.push(mention);
-      if (articles.length === 3) break;
-    }
-    paragraphes.push(
-      `${nombre(adoptes.length)} amendement${adoptes.length > 1 ? 's ont été adoptés' : ' a été adopté'} ` +
-      `avec le soutien du groupe sur ce périmètre` +
-      (articles.length ? `, les plus récents portant sur ${enumererFr(articles)}.` : '.')
-    );
+  const choisis = marquants(rangs, registre === 'note' ? 5 : 3)
+    .map((e) => ({ ...e, position: positionSujet(e.scrutin, selection, e.rang) }))
+    .filter((e) => e.position && 'pca'.includes(e.position));
+  if (choisis.length) {
+    const phrases = choisis.map((e, rang) => phraseVote(
+      e.scrutin, e.position,
+      rang === 0 ? sujet : pronom,
+      marque, texteUnique
+    ));
+    paragraphes.push(phrases.join(' '));
   }
 
   paragraphes.push(
     `Source : scrutins publics de l’Assemblée nationale, XVIIe législature, ` +
-    `données arrêtées au ${dateLongue(d.genereLe.slice(0, 10))}.`
+    `données arrêtées au ${dateLongue(etat.index.genereLe.slice(0, 10))}.`
   );
-
   return paragraphes.join('\n\n');
 }
 
-function ouvrirEDL() {
-  const resultats = etat.resultats || filtrer();
-  $('#edl-texte').value = composerEDL(resultats);
-  $('#edl-note').textContent = `Rédigé à partir des ${nombre(resultats.length)} scrutins actuellement filtrés. Relisez et ajustez avant diffusion.`;
-  $('#copie-ok').hidden = true;
-  $('#edl').hidden = false;
+/* ------------------------------------------------------------- Rendu */
+
+function tableauRepartition(compte, ordre, unite) {
+  const total = ordre.reduce((s, cle) => s + (compte[cle] || 0), 0) || 1;
+  return '<table><thead><tr><th>Position</th><th>' + unite + '</th><th>Part</th></tr></thead><tbody>' +
+    ordre.filter((cle) => compte[cle] > 0).map((cle) =>
+      `<tr><td>${LIBELLES[cle]}</td><td>${nombre(compte[cle])}</td><td>${Math.round((compte[cle] / total) * 100)} %</td></tr>`
+    ).join('') + '</tbody></table>';
 }
 
-/* ------------------------------------------------------------- Démarrage */
+function ligneScrutin(scrutin, selection, rang) {
+  const position = positionSujet(scrutin, selection, rang);
+  const classe = position && 'pca'.includes(position) ? position : '';
+  const lien = `https://www.assemblee-nationale.fr/dyn/${etat.index.legislature}/scrutins/${scrutin.n}`;
+  return `<li class="scrutin ${classe}">
+    <div class="scrutin-haut">
+      <span>${dateCourte(scrutin.d)}</span><span>·</span>
+      <span>n°&nbsp;${scrutin.n}</span><span>·</span>
+      <span class="puce">${echapper(scrutin.c)}</span>
+      <span class="puce ${classe}">${position ? LIBELLES[position] : 'Sans position'}</span>
+      ${scrutin.solennel ? '<span class="puce">Solennel</span>' : ''}
+    </div>
+    <p class="scrutin-objet">${echapper(scrutin.o)}</p>
+    <div class="scrutin-bas">
+      <span>${scrutin.s === 'adopté' ? 'Adopté' : 'Rejeté'} — Assemblée&nbsp;: ${nombre(scrutin.a[0])} pour, ${nombre(scrutin.a[1])} contre</span>
+      <a href="${lien}" rel="noopener" target="_blank">Détail sur le site de l’Assemblée</a>
+    </div>
+  </li>`;
+}
+
+function rendre() {
+  const selection = lireSelection();
+  etat.rangs = filtrer(selection);
+  const rangs = etat.rangs;
+  const { sujet, perimetre } = titreSelection(selection, rangs);
+
+  const inconnus = rangs.filter((r) => etat.index.scrutins[r].gInconnu).length;
+  $('#compte').innerHTML =
+    `<strong>${nombre(rangs.length)}</strong> scrutin${rangs.length > 1 ? 's' : ''} retenu${rangs.length > 1 ? 's' : ''}` +
+    ` sur ${nombre(etat.index.scrutins.length)}` +
+    (inconnus ? ` · ${nombre(inconnus)} sans ventilation par groupe publiée` : '');
+
+  $('#titre-sujet').textContent = selection.sujet === 'groupe'
+    ? 'Répartition des positions du groupe' : 'Répartition des votes du député';
+  $('#sous-sujet').textContent = `${sujet} — ${perimetre}`;
+  $('#sous-groupes').textContent = perimetre;
+
+  const attenteDepute = selection.sujet === 'depute' && !etat.nominatif;
+  $('#toile-sujet').innerHTML = attenteDepute
+    ? '<p class="figure-sous">Chargement des votes nominatifs…</p>'
+    : figureSujet(selection, rangs, largeurToile('toile-sujet'));
+  $('#toile-groupes').innerHTML = figureGroupes(selection, rangs, largeurToile('toile-groupes'));
+
+  const compte = repartitionSujet(selection, rangs);
+  const ordre = selection.sujet === 'depute' ? ['p', 'a', 'c', 'n', 'x'] : ['p', 'a', 'c', 's'];
+  $('#table-sujet').innerHTML = compte.total ? tableauRepartition(compte, ordre, 'Scrutins') : '';
+  $('#table-groupes').innerHTML =
+    '<table><thead><tr><th>Groupe</th><th>Pour</th><th>Abstention</th><th>Contre</th><th>Scrutins</th></tr></thead><tbody>' +
+    repartitionGroupes(selection, rangs).map((l) =>
+      `<tr><td>${echapper(l.titre)}</td><td>${nombre(l.compte.p)}</td><td>${nombre(l.compte.a)}</td>` +
+      `<td>${nombre(l.compte.c)}</td><td>${nombre(l.compte.total)}</td></tr>`).join('') +
+    '</tbody></table>';
+
+  const liste = $('#liste');
+  if (!rangs.length) {
+    liste.innerHTML = '<li class="vide">Aucun scrutin ne correspond à cette sélection.</li>';
+    $('#btn-plus').hidden = true;
+  } else {
+    const ordreListe = rangs.slice().reverse();
+    liste.innerHTML = ordreListe.slice(0, etat.affiches)
+      .map((rang) => ligneScrutin(etat.index.scrutins[rang], selection, rang)).join('');
+    const reste = ordreListe.length - etat.affiches;
+    $('#btn-plus').hidden = reste <= 0;
+    if (reste > 0) $('#btn-plus').textContent = `Afficher la suite (${nombre(reste)})`;
+  }
+}
+
+/* --------------------------------------------------------- Chargement */
+
+async function chargerNominatif() {
+  if (etat.nominatif) return;
+  const reponse = await fetch('data/nominatif.json');
+  if (!reponse.ok) throw new Error(`votes nominatifs indisponibles (${reponse.status})`);
+  etat.nominatif = await reponse.json();
+}
 
 function remplirSelecteurs() {
-  const d = etat.donnees;
-  const optionsTextes = d.textes
-    .map((t) => `<option value="${echapper(t.cle)}">${echapper(t.libelle)} (${nombre(t.scrutins)})</option>`).join('');
-  $('#f-texte').insertAdjacentHTML('beforeend', optionsTextes);
-  $('#f-depute-texte').insertAdjacentHTML('beforeend', optionsTextes);
+  const index = etat.index;
 
-  $('#f-depute').insertAdjacentHTML('beforeend', d.deputes
-    .map((dep, i) => `<option value="${i}">${echapper(dep.nom)} ${echapper(dep.prenom)}${dep.dateFin ? ' (ancien membre)' : ''}</option>`)
-    .join(''));
+  $('#f-groupe').innerHTML = index.groupes
+    .map((g, i) => `<option value="${i}">${echapper(g.libelle)} (${nombre(g.membres)} députés)</option>`).join('');
+  const horizons = index.groupes.findIndex((g) => g.sigle === 'HOR');
+  $('#f-groupe').value = String(horizons >= 0 ? horizons : 0);
+
+  $('#f-depute').innerHTML = '<option value="">Choisir un député</option>' + index.deputes
+    .map((d, i) => `<option value="${i}">${echapper(d.nom)} ${echapper(d.prenom)} — ${echapper((index.groupes.find((g) => g.uid === d.groupe) || {}).sigle || '')}</option>`)
+    .join('');
+
+  const textes = index.textes.slice().sort((a, b) => b.scrutins - a.scrutins);
+  $('#f-texte').innerHTML = '<option value="">Tous les textes</option>' + textes
+    .map((t) => `<option value="${echapper(t.cle)}">${echapper(t.libelle)} (${nombre(t.scrutins)})</option>`).join('');
+
+  const natures = Array.from(new Set(index.scrutins.map((s) => s.c))).sort();
+  $('#f-nature').innerHTML = '<option value="">Toutes</option>' +
+    natures.map((n) => `<option value="${echapper(n)}">${echapper(n)}</option>`).join('');
+
+  $('#f-debut').min = $('#f-fin').min = index.periode.debut;
+  $('#f-debut').max = $('#f-fin').max = index.periode.fin;
+  $('#f-debut').value = index.periode.debut;
+  $('#f-fin').value = index.periode.fin;
 
   $('#entete-resume').textContent =
-    `${nombre(d.scrutins.length)} scrutins publics sur les textes financiers de la XVIIe législature, ` +
-    `du ${dateLongue(d.periode.debut)} au ${dateLongue(d.periode.fin)} · ${d.deputes.length} députés`;
+    `${nombre(index.scrutins.length)} scrutins publics de la XVIIe législature, du ${dateLongue(index.periode.debut)} ` +
+    `au ${dateLongue(index.periode.fin)} · ${nombre(index.deputes.length)} députés · ${index.groupes.length} groupes · ` +
+    `${nombre(index.textes.length)} textes`;
+  $('#pied-maj').textContent = `Données reconstruites le ${dateLongue(index.genereLe.slice(0, 10))}.`;
+}
 
-  $('#pied-maj').textContent = `Données reconstruites le ${dateLongue(d.genereLe.slice(0, 10))}.`;
-  $('#pied-resumes').textContent = d.resumesRaccordes
-    ? 'Les résumés d’amendements proviennent de l’outil du groupe.'
-    : 'Les résumés d’amendements ne sont pas encore raccordés.';
+function ouvrirModale(titre, note, texte) {
+  $('#modale-titre').textContent = titre;
+  $('#modale-note').textContent = note;
+  $('#modale-texte').value = texte;
+  $('#copie-ok').hidden = true;
+  $('#modale').hidden = false;
 }
 
 function installerEvenements() {
-  const relancer = () => { etat.affiches = PAS_AFFICHAGE; etat.deplies.clear(); rendreScrutins(); };
+  const relancer = () => { etat.affiches = PAS_LISTE; rendre(); };
 
-  ['#f-texte', '#f-categorie', '#f-position', '#f-sort', '#f-depute', '#f-marquants', '#f-ecarts']
+  $$('input[name="sujet"]').forEach((bouton) => bouton.addEventListener('change', async () => {
+    const depute = $('input[name="sujet"]:checked').value === 'depute';
+    $('#f-groupe').hidden = depute;
+    $('#f-depute').hidden = !depute;
+    $('#lab-sujet').textContent = depute ? 'Député' : 'Groupe';
+    $('#lab-sujet').setAttribute('for', depute ? 'f-depute' : 'f-groupe');
+    if (depute && $('#f-depute').value === '') $('#f-depute').selectedIndex = 1;
+    relancer();
+    if (depute) {
+      try { await chargerNominatif(); } catch (erreur) {
+        $('#toile-sujet').innerHTML = `<p class="figure-sous">${echapper(erreur.message)}</p>`;
+        return;
+      }
+      rendre();
+    }
+  }));
+
+  $$('input[name="perimetre"]').forEach((bouton) => bouton.addEventListener('change', () => {
+    const periode = $('input[name="perimetre"]:checked').value === 'periode';
+    $('#bloc-texte').hidden = periode;
+    $('#bloc-periode').hidden = !periode;
+    relancer();
+  }));
+
+  ['#f-groupe', '#f-depute', '#f-texte', '#f-debut', '#f-fin', '#f-nature', '#f-issue']
     .forEach((sel) => $(sel).addEventListener('change', relancer));
 
   let minuteur;
@@ -665,93 +678,88 @@ function installerEvenements() {
     minuteur = setTimeout(relancer, 180);
   });
 
-  $('#btn-plus').addEventListener('click', () => { etat.affiches += PAS_AFFICHAGE; rendreScrutins(); });
+  $('#btn-plus').addEventListener('click', () => { etat.affiches += PAS_LISTE; rendre(); });
 
   $('#btn-reset').addEventListener('click', () => {
-    $$('.filtres select').forEach((s) => { s.value = ''; });
-    $$('.filtres input[type="search"]').forEach((s) => { s.value = ''; });
-    $('#f-marquants').checked = false;
-    $('#f-ecarts').checked = false;
+    $('#f-texte').value = '';
+    $('#f-nature').value = '';
+    $('#f-issue').value = '';
+    $('#f-recherche').value = '';
+    $('#f-debut').value = etat.index.periode.debut;
+    $('#f-fin').value = etat.index.periode.fin;
     relancer();
   });
 
-  $('#liste').addEventListener('click', (evt) => {
-    const bouton = evt.target.closest('[data-bascule]');
-    if (!bouton) return;
-    const numero = Number(bouton.dataset.bascule);
-    if (etat.deplies.has(numero)) etat.deplies.delete(numero); else etat.deplies.add(numero);
-    rendreScrutins();
-  });
-
-  $$('.onglet').forEach((onglet) => onglet.addEventListener('click', () => {
-    $$('.onglet').forEach((o) => o.classList.toggle('actif', o === onglet));
-    etat.vue = onglet.dataset.vue;
-    $('#vue-scrutins').hidden = etat.vue !== 'scrutins';
-    $('#vue-deputes').hidden = etat.vue !== 'deputes';
-    if (etat.vue === 'deputes') rendreDeputes();
+  $$('[data-png]').forEach((bouton) => bouton.addEventListener('click', () => {
+    exporterPNG(bouton.dataset.png).catch(() => {
+      alert('Le navigateur n’a pas pu produire l’image. Une capture d’écran reste possible.');
+    });
   }));
 
-  ['#f-depute-recherche', '#f-depute-texte', '#f-depute-actifs']
-    .forEach((sel) => $(sel).addEventListener('input', rendreDeputes));
-
-  $('#grille-deputes').addEventListener('click', (evt) => {
-    const carte = evt.target.closest('[data-depute]');
-    if (carte) ouvrirFicheDepute(Number(carte.dataset.depute));
-  });
-
-  $('#btn-edl').addEventListener('click', ouvrirEDL);
+  $('#btn-note').addEventListener('click', () => ouvrirModale(
+    'Note', 'Descriptive et neutre, pour un dossier ou une fiche de travail. Relisez avant diffusion.',
+    composer('note')));
+  $('#btn-edl').addEventListener('click', () => ouvrirModale(
+    'Élément de langage', 'Écrit pour être repris à l’oral ou dans un communiqué. Relisez avant diffusion.',
+    composer('edl')));
 
   $('#btn-copier').addEventListener('click', async () => {
-    const champ = $('#edl-texte');
-    try {
-      await navigator.clipboard.writeText(champ.value);
-    } catch (_) {
-      champ.select();
-      document.execCommand('copy');   // repli pour les navigateurs sans presse-papier asynchrone
-    }
+    const champ = $('#modale-texte');
+    try { await navigator.clipboard.writeText(champ.value); }
+    catch (_) { champ.select(); document.execCommand('copy'); }
     $('#copie-ok').hidden = false;
   });
 
   $('#btn-telecharger').addEventListener('click', () => {
-    const blob = new Blob([$('#edl-texte').value], { type: 'text/plain;charset=utf-8' });
+    const blob = new Blob([$('#modale-texte').value], { type: 'text/plain;charset=utf-8' });
     const lien = document.createElement('a');
     lien.href = URL.createObjectURL(blob);
-    lien.download = `edl-votes-horizons-${new Date().toISOString().slice(0, 10)}.txt`;
+    lien.download = `votes-${new Date().toISOString().slice(0, 10)}.txt`;
     lien.click();
     URL.revokeObjectURL(lien.href);
   });
 
-  document.addEventListener('click', (evt) => {
-    if (evt.target.closest('[data-fermer]')) {
-      $('#fiche').hidden = true;
-      $('#edl').hidden = true;
-    }
+  document.addEventListener('click', (evenement) => {
+    if (evenement.target.closest('[data-fermer]')) $('#modale').hidden = true;
+  });
+  document.addEventListener('keydown', (evenement) => {
+    if (evenement.key === 'Escape') $('#modale').hidden = true;
   });
 
-  document.addEventListener('keydown', (evt) => {
-    if (evt.key === 'Escape') { $('#fiche').hidden = true; $('#edl').hidden = true; }
+  // Les figures sont tracees en pixels reels : un changement de largeur impose
+  // de les retracer, sans quoi elles resteraient a l'ancienne dimension.
+  let largeurConnue = window.innerWidth;
+  let attenteRedimension;
+  window.addEventListener('resize', () => {
+    if (window.innerWidth === largeurConnue) return;
+    largeurConnue = window.innerWidth;
+    clearTimeout(attenteRedimension);
+    attenteRedimension = setTimeout(rendre, 150);
+  });
+
+  // Infobulle : la cible survolee est plus grande que la marque elle-meme.
+  const bulle = $('#infobulle');
+  document.addEventListener('mousemove', (evenement) => {
+    const cible = evenement.target.closest('[data-bulle]');
+    if (!cible) { bulle.hidden = true; return; }
+    bulle.textContent = cible.dataset.bulle;
+    bulle.hidden = false;
+    const largeur = bulle.offsetWidth;
+    bulle.style.left = `${Math.min(evenement.clientX + 12, window.innerWidth - largeur - 8)}px`;
+    bulle.style.top = `${evenement.clientY + 16}px`;
   });
 }
 
 async function demarrer() {
-  const reponse = await fetch('data/votes.json');
+  const reponse = await fetch('data/index.json');
   if (!reponse.ok) throw new Error(`Chargement des données impossible (${reponse.status})`);
-  etat.donnees = await reponse.json();
-
-  $('#app').hidden = false;
+  etat.index = await reponse.json();
   remplirSelecteurs();
   installerEvenements();
-  rendreScrutins();
+  $('#app').hidden = false;
+  rendre();
 }
 
-(function initialiser() {
-  let dejaOuvert = false;
-  try { dejaOuvert = sessionStorage.getItem(CLE_SESSION) === '1'; } catch (_) { /* navigation privée */ }
-  if (dejaOuvert || !window.CONFIG.empreinteMotDePasse) {
-    demarrer().catch((erreur) => {
-      document.body.innerHTML = `<p class="vide">${echapper(erreur.message)}</p>`;
-    });
-  } else {
-    installerPorte();
-  }
-})();
+demarrer().catch((erreur) => {
+  $('#entete-resume').textContent = erreur.message;
+});
